@@ -1,0 +1,32 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'IBM Plex Sans', 'Noto Sans TC', 'Segoe UI', sans-serif;
+  --font-display: 'Fraunces', 'Noto Serif TC', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply m-0 min-w-80 bg-slate-950 font-sans text-slate-100;
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+}
+
+@utility font-display {
+  font-family: var(--font-display);
+}
