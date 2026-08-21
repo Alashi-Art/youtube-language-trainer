@@ -1,3 +1,4 @@
+import * as OpenCC from 'opencc-js'
 import type { SubtitleCue } from '../types'
 
 export type ParsedCue = {
@@ -31,6 +32,19 @@ type SupadataResponse = {
 
 const SUPADATA_API_BASE = 'https://api.supadata.ai/v1/youtube/transcript'
 
+// 初始化 OpenCC 繁簡轉換器（轉換為臺灣正體習慣詞彙）
+const twConverter = OpenCC.Converter({ from: 'cn', to: 'twp' })
+
+/** 將字串轉換為臺灣繁體中文 */
+export function toTraditionalChinese(text: string): string {
+  if (!text) return ''
+  try {
+    return twConverter(text)
+  } catch {
+    return text
+  }
+}
+
 function cleanText(text: string): string {
   return text
     .replace(/&amp;/g, '&')
@@ -41,6 +55,110 @@ function cleanText(text: string): string {
     .replace(/\n/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+/** 常見縮寫與字首簡稱白名單（避免因點號誤斷句） */
+const ABBREVIATIONS = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'prof', 'st', 'vs', 'etc', 'eg', 'ie', 'jr', 'sr',
+  'us', 'uk', 'un', 'eu', 'am', 'pm', 'dc', 'jan', 'feb', 'mar', 'apr',
+  'aug', 'sept', 'sep', 'oct', 'nov', 'dec', 'vol', 'dept', 'approx', 'no'
+])
+
+function isAcronymOrAbbr(text: string, dotIndex: number): boolean {
+  let start = dotIndex - 1
+  while (start >= 0 && /[a-zA-Z.]/.test(text[start])) {
+    start--
+  }
+  const token = text.slice(start + 1, dotIndex).replace(/\./g, '').toLowerCase()
+  return ABBREVIATIONS.has(token)
+}
+
+/**
+ * 智慧斷句函數：
+ * 支援英文標點（. ! ?）與中文全形標點（。！？；），並排除縮寫、小數點及省略號。
+ */
+export function splitIntoSentences(text: string): string[] {
+  const trimmed = text.trim()
+  if (!trimmed) return []
+
+  const sentences: string[] = []
+  let currentStart = 0
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const char = trimmed[i]
+
+    // 中文全形標點符號：。！？；
+    if (char === '。' || char === '！' || char === '？' || char === '；') {
+      const sentence = trimmed.slice(currentStart, i + 1).trim()
+      if (sentence) {
+        sentences.push(sentence)
+      }
+      currentStart = i + 1
+      continue
+    }
+
+    // 英文半形標點符號：. ! ?
+    if (char === '.' || char === '!' || char === '?') {
+      // 排除省略號如 ...
+      if (char === '.' && (trimmed[i + 1] === '.' || (i > 0 && trimmed[i - 1] === '.'))) {
+        continue
+      }
+
+      // 排除小數點如 3.14 或 $10.50
+      if (
+        char === '.' &&
+        i > 0 &&
+        i < trimmed.length - 1 &&
+        /\d/.test(trimmed[i - 1]) &&
+        /\d/.test(trimmed[i + 1])
+      ) {
+        continue
+      }
+
+      // 排除常見英文縮寫（Dr., U.S., e.g.）
+      if (char === '.' && isAcronymOrAbbr(trimmed, i)) {
+        continue
+      }
+
+      const nextChar = trimmed[i + 1]
+      const nextNextChar = trimmed[i + 2]
+
+      const isEnd = i === trimmed.length - 1
+      const isFollowedBySpace = nextChar === ' ' || nextChar === '\n' || nextChar === '\t'
+      const isQuoteThenSpace =
+        (nextChar === '"' || nextChar === "'" || nextChar === '”' || nextChar === '’') &&
+        (i + 1 === trimmed.length - 1 || nextNextChar === ' ' || nextNextChar === '\n')
+
+      if (isEnd || isFollowedBySpace || isQuoteThenSpace) {
+        const splitEnd = isQuoteThenSpace ? i + 2 : i + 1
+        const sentence = trimmed.slice(currentStart, splitEnd).trim()
+        if (sentence) {
+          sentences.push(sentence)
+        }
+        currentStart = isQuoteThenSpace
+          ? nextNextChar === ' '
+            ? i + 3
+            : i + 2
+          : nextChar === ' '
+            ? i + 2
+            : i + 1
+        i = currentStart - 1
+      }
+    }
+  }
+
+  if (currentStart < trimmed.length) {
+    const remaining = trimmed.slice(currentStart).trim()
+    if (remaining) {
+      if (sentences.length > 0 && remaining.length < 5) {
+        sentences[sentences.length - 1] += ' ' + remaining
+      } else {
+        sentences.push(remaining)
+      }
+    }
+  }
+
+  return sentences.length > 0 ? sentences : [trimmed]
 }
 
 function parseSupadataCues(content: unknown): ParsedCue[] {
@@ -102,8 +220,69 @@ export function findAlignedTranslation(
   }
 
   // 時間差過大不硬配，避免錯譯
-  if (bestDist > Math.max(source.duration, 2.5)) return undefined
+  if (bestDist > Math.max(source.duration, 3)) return undefined
   return best.text
+}
+
+/**
+ * 智慧斷句切割與時間軸重構：
+ * 若單一字幕節點包含多個句子，依字元長度比例分配時間軸，並將中文翻譯對齊至各子句。
+ */
+function splitAndAlignCues(
+  sourceCues: ParsedCue[],
+  translationCues: ParsedCue[],
+  videoId: string,
+): SubtitleCue[] {
+  const result: SubtitleCue[] = []
+
+  for (const cue of sourceCues) {
+    const enSentences = splitIntoSentences(cue.text)
+    const rawTranslation = findAlignedTranslation(cue, translationCues)
+
+    // 單一句子直接收錄
+    if (enSentences.length <= 1) {
+      result.push({
+        id: `${videoId}-${result.length}`,
+        start: cue.start,
+        duration: cue.duration,
+        text: cue.text,
+        translation: rawTranslation ? toTraditionalChinese(rawTranslation) : undefined,
+      })
+      continue
+    }
+
+    // 多句子進行智慧切分並依字數權重分配時間軸
+    const totalChars = enSentences.reduce((acc, s) => acc + s.length, 0) || 1
+    const zhSentences = rawTranslation ? splitIntoSentences(rawTranslation) : []
+
+    let currentStart = cue.start
+    enSentences.forEach((sentence, idx) => {
+      const charRatio = sentence.length / totalChars
+      const subDuration = Math.max(0.2, Math.round(cue.duration * charRatio * 100) / 100)
+
+      let subTranslation: string | undefined = undefined
+      if (zhSentences.length === enSentences.length) {
+        subTranslation = toTraditionalChinese(zhSentences[idx])
+      } else if (zhSentences.length > 0) {
+        const zhIdx = Math.min(idx, zhSentences.length - 1)
+        subTranslation = toTraditionalChinese(zhSentences[zhIdx])
+      } else if (rawTranslation) {
+        subTranslation = toTraditionalChinese(rawTranslation)
+      }
+
+      result.push({
+        id: `${videoId}-${result.length}`,
+        start: Math.round(currentStart * 100) / 100,
+        duration: subDuration,
+        text: sentence,
+        translation: subTranslation,
+      })
+
+      currentStart += subDuration
+    })
+  }
+
+  return result
 }
 
 async function requestSupadata(
@@ -186,22 +365,29 @@ export async function fetchClientCaptions(videoId: string): Promise<VideoCaption
 
   const resolvedLang = mainData?.lang || usedLang
   const languageDisplayName =
-    resolvedLang === 'en' ? 'English' : resolvedLang.startsWith('zh') ? '中文' : resolvedLang
+    resolvedLang === 'en'
+      ? 'English'
+      : resolvedLang.startsWith('zh')
+        ? '繁體中文'
+        : resolvedLang
 
-  // 2. 嘗試抓取中文字幕（繁體優先）作為翻譯對齊
+  // 2. 嘗試抓取中文字幕（優先嘗試 zh-TW / zh-Hant，再嘗試 zh-CN / zh）
   let translationCues: ParsedCue[] = []
   let translationLanguageName: string | null = null
 
   if (!resolvedLang.startsWith('zh')) {
-    // 原文非中文，嘗試依序抓取繁中 (zh-TW / zh-Hant) 或簡中 (zh-CN / zh)
-    const zhLangsToTry = ['zh-TW', 'zh-Hant', 'zh-CN', 'zh']
+    const zhLangsToTry = ['zh-TW', 'zh-Hant', 'zh-HK', 'zh-CN', 'zh']
     for (const zhLang of zhLangsToTry) {
       try {
         const zhData = await requestSupadata(videoId, apiKey, zhLang)
         const parsedZh = parseSupadataCues(zhData.content)
         if (parsedZh.length > 0) {
-          translationCues = parsedZh
-          translationLanguageName = zhLang.startsWith('zh-T') || zhLang === 'zh-Hant' ? '繁體中文' : '中文'
+          // 強制將抓回的中文字幕全面轉為繁體正體中文
+          translationCues = parsedZh.map((c) => ({
+            ...c,
+            text: toTraditionalChinese(c.text),
+          }))
+          translationLanguageName = '繁體中文'
           break
         }
       } catch {
@@ -222,17 +408,8 @@ export async function fetchClientCaptions(videoId: string): Promise<VideoCaption
     }
   }
 
-  // 3. 組合與對齊字幕資料
-  const cues: SubtitleCue[] = sourceCues.map((cue, index) => {
-    const translation = findAlignedTranslation(cue, translationCues)
-    return {
-      id: `${videoId}-${index}`,
-      start: cue.start,
-      duration: cue.duration,
-      text: cue.text,
-      ...(translation ? { translation } : {}),
-    }
-  })
+  // 3. 智慧斷句、時間軸二次切割與雙語對齊
+  const cues = splitAndAlignCues(sourceCues, translationCues, videoId)
 
   return {
     videoId,

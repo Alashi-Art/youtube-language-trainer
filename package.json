@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "lucide-react": "^1.33.0",
+    "opencc-js": "^1.4.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-youtube": "^10.1.0",
