@@ -25,39 +25,51 @@ export type VideoCaptionsResult = {
 const ZH_LANG_CODES = ['zh-TW', 'zh-Hant', 'zh-HK', 'zh-Hans', 'zh-CN', 'zh']
 const EN_LANG_CODES = ['en', 'en-US', 'en-GB', 'en-CA', 'en-AU']
 
-const PROXY_BUILDERS = [
-  (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  (url: string) => `https://corsproxy.io/?${url}`,
-  (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-]
-
-async function fetchWithProxies(targetUrl: string, timeoutMs = 8000): Promise<string> {
-  let lastError: Error | null = null
-
-  for (const buildProxyUrl of PROXY_BUILDERS) {
-    const proxyUrl = buildProxyUrl(targetUrl)
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
-
-    try {
-      const res = await fetch(proxyUrl, { signal: controller.signal })
-      clearTimeout(timer)
-
-      if (res.ok) {
-        const text = await res.text()
-        if (text && text.trim().length > 0) {
-          return text
-        }
-      }
-    } catch (e) {
-      clearTimeout(timer)
-      lastError = e instanceof Error ? e : new Error(String(e))
-    }
-  }
-
-  throw lastError ?? new Error('無法透過代理伺服器連線至目標頁面')
+type ProxyDef = {
+  name: string
+  buildUrl: (targetUrl: string) => string
+  parseResponse?: (resText: string) => string
 }
+
+/** 多重 CORS Proxy 備援清單 */
+export const PROXY_LIST: ProxyDef[] = [
+  {
+    name: 'AllOrigins Raw',
+    buildUrl: (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  },
+  {
+    name: 'AllOrigins JSON',
+    buildUrl: (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+    parseResponse: (raw) => {
+      try {
+        const data = JSON.parse(raw)
+        return typeof data.contents === 'string' ? data.contents : raw
+      } catch {
+        return raw
+      }
+    },
+  },
+  {
+    name: 'CodeTabs',
+    buildUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  },
+  {
+    name: 'ThingProxy',
+    buildUrl: (url) => `https://thingproxy.freeboard.io/fetch/${url}`,
+  },
+  {
+    name: 'CorsProxy.io (Encoded)',
+    buildUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  },
+  {
+    name: 'CorsProxy.io (Direct)',
+    buildUrl: (url) => `https://corsproxy.io/?${url}`,
+  },
+  {
+    name: 'Proxy.cors.sh',
+    buildUrl: (url) => `https://proxy.cors.sh/${url}`,
+  },
+]
 
 export function extractCaptionTracks(html: string): RawCaptionTrack[] {
   // 1. 嘗試直接提取 captionTracks 陣列
@@ -216,24 +228,107 @@ export function findAlignedTranslation(
   return best.text
 }
 
-export async function fetchClientCaptions(videoId: string): Promise<VideoCaptionsResult> {
+/** 依序輪詢 Proxy 抓取 YouTube HTML 並解析字幕軌道 */
+async function fetchYouTubeTracksWithFallback(
+  videoId: string,
+): Promise<{ tracks: RawCaptionTrack[]; successfulProxy: string }> {
   const watchUrl = `https://www.youtube.com/watch?v=${videoId}`
+  const attemptLogs: string[] = []
 
-  let html = ''
-  try {
-    html = await fetchWithProxies(watchUrl)
-  } catch {
-    throw new Error(
-      '無法連線至 YouTube 影片頁面或代理伺服器異常，請確認網路連線或稍後再試。',
-    )
+  for (const proxy of PROXY_LIST) {
+    const proxyUrl = proxy.buildUrl(watchUrl)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 7000)
+
+    try {
+      const res = await fetch(proxyUrl, { signal: controller.signal })
+      clearTimeout(timer)
+
+      if (!res.ok) {
+        attemptLogs.push(`${proxy.name}: HTTP ${res.status}`)
+        continue
+      }
+
+      let text = await res.text()
+      if (proxy.parseResponse) {
+        text = proxy.parseResponse(text)
+      }
+
+      if (!text || text.trim().length === 0) {
+        attemptLogs.push(`${proxy.name}: 回傳為空`)
+        continue
+      }
+
+      const tracks = extractCaptionTracks(text)
+      if (tracks.length > 0) {
+        console.log(`[Language Trainer] 透過 ${proxy.name} 成功取得 ${tracks.length} 組字幕軌道`)
+        return { tracks, successfulProxy: proxy.name }
+      }
+
+      attemptLogs.push(`${proxy.name}: 頁面未解析出字幕軌道`)
+    } catch (e) {
+      clearTimeout(timer)
+      const msg = e instanceof Error ? e.message : String(e)
+      attemptLogs.push(`${proxy.name}: ${msg}`)
+    }
   }
 
-  const tracks = extractCaptionTracks(html)
-  if (tracks.length === 0) {
-    throw new Error('該影片未提供內建字幕或無法解析，請試試其他影片（建議挑選有 CC 字幕的影片）。')
+  console.warn('[Language Trainer] 所有 Proxy 嘗試紀錄：\n' + attemptLogs.join('\n'))
+  throw new Error(
+    `該影片未提供內建字幕，或所有備援 Proxy 皆連線受限（已嘗試 ${PROXY_LIST.length} 個代理服務）。建議確認該影片在 YouTube 上是否有 CC 字幕。`,
+  )
+}
+
+/** 依序輪詢 Proxy 下載 XML 字幕資料 */
+async function fetchXmlWithFallback(baseUrl: string): Promise<ParsedCue[]> {
+  const attemptLogs: string[] = []
+
+  for (const proxy of PROXY_LIST) {
+    const proxyUrl = proxy.buildUrl(baseUrl)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 7000)
+
+    try {
+      const res = await fetch(proxyUrl, { signal: controller.signal })
+      clearTimeout(timer)
+
+      if (!res.ok) {
+        attemptLogs.push(`${proxy.name}: HTTP ${res.status}`)
+        continue
+      }
+
+      let text = await res.text()
+      if (proxy.parseResponse) {
+        text = proxy.parseResponse(text)
+      }
+
+      if (!text || text.trim().length === 0) {
+        attemptLogs.push(`${proxy.name}: 回傳為空`)
+        continue
+      }
+
+      const cues = parseTimedTextXml(text)
+      if (cues.length > 0) {
+        return cues
+      }
+
+      attemptLogs.push(`${proxy.name}: XML 未解析出有效時間軸節點`)
+    } catch (e) {
+      clearTimeout(timer)
+      const msg = e instanceof Error ? e.message : String(e)
+      attemptLogs.push(`${proxy.name}: ${msg}`)
+    }
   }
 
-  // 1. 挑選主要語言軌道 (Source Track)
+  console.warn('[Language Trainer] 字幕 XML 抓取嘗試紀錄：\n' + attemptLogs.join('\n'))
+  throw new Error('無法下載字幕 XML 資料（所有備援 Proxy 皆嘗試失敗）。')
+}
+
+export async function fetchClientCaptions(videoId: string): Promise<VideoCaptionsResult> {
+  // 1. 透過多重 Proxy 備援機制抓取並解析字幕軌道
+  const { tracks } = await fetchYouTubeTracksWithFallback(videoId)
+
+  // 2. 挑選主要語言軌道 (Source Track)
   // 優先順序：人工英文字幕 -> 任何英文字幕 -> 中文字幕 -> 首個可用字幕
   const manualEnTrack = tracks.find(
     (t) => EN_LANG_CODES.includes(t.languageCode) && t.kind !== 'asr',
@@ -242,7 +337,7 @@ export async function fetchClientCaptions(videoId: string): Promise<VideoCaption
   const zhTrack = tracks.find((t) => ZH_LANG_CODES.includes(t.languageCode))
   const sourceTrack = manualEnTrack || anyEnTrack || zhTrack || tracks[0]
 
-  // 2. 挑選翻譯語言軌道 (Translation Track)
+  // 3. 挑選翻譯語言軌道 (Translation Track)
   // 優先順序：繁體中文 (zh-TW/zh-Hant/zh-HK) -> 簡體中文 (zh-Hans/zh-CN) -> YouTube 自動翻譯 (&tlang=zh-Hant)
   let translationTrack: { baseUrl: string; languageName: string } | null = null
 
@@ -286,34 +381,26 @@ export async function fetchClientCaptions(videoId: string): Promise<VideoCaption
     }
   }
 
-  // 3. 抓取主要語言字幕 XML
-  let sourceXml = ''
-  try {
-    sourceXml = await fetchWithProxies(sourceTrack.baseUrl)
-  } catch {
-    throw new Error('無法下載該影片的字幕資料，請稍後再試。')
-  }
-
-  const sourceCues = parseTimedTextXml(sourceXml)
+  // 4. 下載主要語言字幕 XML（套用 Proxy 備援機制）
+  const sourceCues = await fetchXmlWithFallback(sourceTrack.baseUrl)
   if (sourceCues.length === 0) {
     throw new Error('該影片字幕內容為空或格式無法辨識，請試試其他影片。')
   }
 
-  // 4. 抓取翻譯語言字幕 XML（可選）
+  // 5. 下載翻譯語言字幕 XML（可選，套用 Proxy 備援機制）
   let translationCues: ParsedCue[] = []
   let translationLanguageName: string | null = null
 
   if (translationTrack) {
     try {
-      const transXml = await fetchWithProxies(translationTrack.baseUrl)
-      translationCues = parseTimedTextXml(transXml)
+      translationCues = await fetchXmlWithFallback(translationTrack.baseUrl)
       translationLanguageName = translationTrack.languageName
     } catch {
       // 翻譯軌道失敗不影響主要字幕顯示
     }
   }
 
-  // 5. 組合對齊字幕資料
+  // 6. 組合對齊雙語字幕資料
   const cues: SubtitleCue[] = sourceCues.map((cue, index) => {
     const translation = findAlignedTranslation(cue, translationCues)
     return {
