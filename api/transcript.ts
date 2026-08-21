@@ -1,5 +1,4 @@
-import type { Plugin } from 'vite'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { YouTubeTranscriptApi } from '@hallelx/youtube-transcript'
 
 type RawCue = {
@@ -19,17 +18,6 @@ export type CaptionCue = {
 const LANG_PRESETS: Record<string, string[]> = {
   en: ['en'],
   zh: ['zh-TW', 'zh-CN', 'zh-Hant', 'zh-Hans', 'zh', 'zh-HK'],
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown) {
-  res.statusCode = status
-  res.setHeader('Content-Type', 'application/json; charset=utf-8')
-  res.end(JSON.stringify(body))
-}
-
-function getQuery(req: IncomingMessage): URLSearchParams {
-  const host = req.headers.host ?? 'localhost'
-  return new URL(req.url ?? '/', `http://${host}`).searchParams
 }
 
 function cleanText(text: string) {
@@ -89,15 +77,54 @@ async function fetchLangCues(videoId: string, langKey: string): Promise<{
   }
 }
 
-async function handleCaptions(req: IncomingMessage, res: ServerResponse) {
-  const query = getQuery(req)
-  const videoId = query.get('videoId')?.trim()
-  const lang = (query.get('lang') ?? 'en').trim().toLowerCase()
-  const translationLang = (query.get('translationLang') ?? 'zh').trim().toLowerCase()
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // CORS 設定
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end()
+  }
+
+  let videoId =
+    typeof req.query.videoId === 'string'
+      ? req.query.videoId
+      : Array.isArray(req.query.videoId)
+        ? req.query.videoId[0]
+        : undefined
+
+  let lang =
+    typeof req.query.lang === 'string'
+      ? req.query.lang
+      : Array.isArray(req.query.lang)
+        ? req.query.lang[0]
+        : undefined
+
+  let translationLang =
+    typeof req.query.translationLang === 'string'
+      ? req.query.translationLang
+      : Array.isArray(req.query.translationLang)
+        ? req.query.translationLang[0]
+        : undefined
+
+  if (!videoId && req.url) {
+    try {
+      const url = new URL(req.url, 'http://localhost')
+      videoId = url.searchParams.get('videoId') ?? undefined
+      if (!lang) lang = url.searchParams.get('lang') ?? undefined
+      if (!translationLang) translationLang = url.searchParams.get('translationLang') ?? undefined
+    } catch {
+      // ignore
+    }
+  }
+
+  videoId = videoId?.trim()
+  lang = (lang ?? 'en').trim().toLowerCase()
+  translationLang = (translationLang ?? 'zh').trim().toLowerCase()
 
   if (!videoId) {
-    sendJson(res, 400, { error: '缺少 videoId 參數' })
-    return
+    return res.status(400).json({ error: '缺少 videoId 參數' })
   }
 
   try {
@@ -130,7 +157,7 @@ async function handleCaptions(req: IncomingMessage, res: ServerResponse) {
       }
     })
 
-    sendJson(res, 200, {
+    return res.status(200).json({
       videoId,
       requestedLang: lang,
       resolvedLanguage: source.resolvedLanguage,
@@ -143,34 +170,10 @@ async function handleCaptions(req: IncomingMessage, res: ServerResponse) {
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    sendJson(res, 502, {
+    return res.status(502).json({
       error: '無法抓取字幕',
       detail: message,
-      hint: '請確認影片有內建/自動字幕，且本機網路可連到 YouTube。',
+      hint: '請確認影片有內建/自動字幕，且伺服器網路可連到 YouTube。',
     })
-  }
-}
-
-/**
- * Vite 開發伺服器中介層：在本機（家用 IP）呼叫 YouTube 內部 API。
- */
-export function captionsApiPlugin(): Plugin {
-  return {
-    name: 'captions-api',
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        if (!req.url?.startsWith('/api/transcript') && !req.url?.startsWith('/api/captions')) {
-          next()
-          return
-        }
-
-        void handleCaptions(req, res).catch((error) => {
-          sendJson(res, 500, {
-            error: '伺服器錯誤',
-            detail: error instanceof Error ? error.message : String(error),
-          })
-        })
-      })
-    },
   }
 }

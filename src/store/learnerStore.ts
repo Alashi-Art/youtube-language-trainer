@@ -158,9 +158,19 @@ export const useLearnerStore = create<LearnerState>()(
 
         try {
           const res = await fetch(
-            `/api/captions?videoId=${encodeURIComponent(videoId)}&lang=en&translationLang=zh`,
+            `/api/transcript?videoId=${encodeURIComponent(videoId)}&lang=en&translationLang=zh`,
           )
-          const data = (await res.json()) as CaptionsResponse | CaptionsError
+
+          let data: CaptionsResponse | CaptionsError
+          const contentType = res.headers.get('content-type')
+          if (contentType && contentType.includes('application/json')) {
+            data = (await res.json()) as CaptionsResponse | CaptionsError
+          } else {
+            const text = await res.text()
+            throw new Error(
+              `API 回應非預期格式 (${res.status} ${res.statusText})：${text.slice(0, 120)}`,
+            )
+          }
 
           if (!res.ok || 'error' in data) {
             const err = data as CaptionsError

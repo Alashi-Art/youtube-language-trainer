@@ -28,7 +28,7 @@ npm run dev
 
 ## API
 
-`GET /api/captions?videoId=VIDEO_ID&lang=en|zh`
+`GET /api/transcript?videoId=VIDEO_ID&lang=en|zh&translationLang=zh`
 
 成功回應重點欄位：
 
@@ -43,6 +43,7 @@ npm run dev
 
 ## 專案結構
 
-- `server/captionsPlugin.ts` — Vite middleware（字幕抓取）
+- `api/transcript.ts` — Vercel Serverless Function（雲端字幕抓取 API）
+- `server/captionsPlugin.ts` — Vite middleware（本機開發字幕抓取）
 - `src/App.tsx` — 極簡 UI
 - `src/lib/youtube.ts` — 網址解析
