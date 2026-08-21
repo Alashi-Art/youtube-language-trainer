@@ -1,19 +1,13 @@
-# Language Trainer · YouTube 字幕 POC
+# Language Trainer · YouTube 語言學習器
 
-極簡概念驗證：輸入 YouTube 網址 → 抓取內建英／中文字幕 → 輸出 `{ start, duration, text }[]`。
+基於 Vite + React + TypeScript 的 YouTube 跟讀與語言學習器，支援前端透過 CORS Proxy 解析 YouTube 字幕與雙語對齊。
 
-## 方案評估（2026）
+## 特色
 
-| 方案 | 費用 | 穩定性（本機 POC） | 說明 |
-| --- | --- | --- | --- |
-| **`@hallelx/youtube-transcript` + Vite 本機 API** ✅ 採用 | 免費 | 高（家用／住宅 IP） | TypeScript 移植自 Python `youtube-transcript-api`，走 YouTube 內部 `youtubei` + `timedtext`。格式正好是 `start` / `duration` / `text`。 |
-| `youtube-transcript`（舊套件） | 免費 | 中高 | 本機也可跑，但時間單位是毫秒（`offset`/`duration`），需自行換算。 |
-| 瀏覽器直接打 YouTube timedtext | 免費 | **不可行** | CORS 擋住，純前端無法穩定取得。 |
-| 公開 CORS Proxy（corsproxy.io 等） | 免費 | 低 | 無 SLA、易限流／消失，只適合臨時 fallback。 |
-| YouTube Data API v3 captions | 有配額 | 不適合 POC | 自動產生字幕通常抓不到，下載需 OAuth。 |
-| 付費 Transcript API | 付費 | 高 | 雲端部署才需要；本機 POC 不必。 |
-
-**結論：** 純前端不行。POC 最穩且免費的做法是在 **Vite 開發伺服器**（本機 IP）用 `@hallelx/youtube-transcript` 當 API。雲端部署時 YouTube 常擋機房 IP，那時才需 proxy／付費服務。
+- 支援 YouTube 網址與 11 碼 Video ID 解析。
+- 純前端（Client-side）透過 CORS Proxy 取得 YouTube 頁面與 `captionTracks`。
+- 支援繁體中文、簡體中文與英文雙語對齊及 YouTube 自動翻譯字幕。
+- 1:1 跟讀留白、自訂語速（0.75x ~ 1.25x）、單句循環、練習區間設定與收藏功能。
 
 ## 快速開始
 
@@ -22,28 +16,13 @@ npm install
 npm run dev
 ```
 
-瀏覽器開啟終端機顯示的本機網址（通常是 `http://localhost:5173`），貼上影片網址後按「抓取字幕」。
-
-預設範例影片：`https://www.youtube.com/watch?v=8jPQjjsBbIc`（有英／中文字幕）。
-
-## API
-
-`GET /api/transcript?videoId=VIDEO_ID&lang=en|zh&translationLang=zh`
-
-成功回應重點欄位：
-
-```json
-{
-  "resolvedLanguage": "zh-TW",
-  "cues": [
-    { "start": 13.24, "duration": 3.329, "text": "幾年前，我闖進自己家裡。" }
-  ]
-}
-```
+瀏覽器開啟終端機顯示的本機網址（通常是 `http://localhost:5173`）。
 
 ## 專案結構
 
-- `api/transcript.ts` — Vercel Serverless Function（雲端字幕抓取 API）
-- `server/captionsPlugin.ts` — Vite middleware（本機開發字幕抓取）
-- `src/App.tsx` — 極簡 UI
-- `src/lib/youtube.ts` — 網址解析
+- `src/lib/captionFetcher.ts` — 前端字幕抓取與 XML 解析服務
+- `src/lib/youtube.ts` — YouTube 網址解析
+- `src/store/learnerStore.ts` — 學習器狀態管理（Zustand + Persist）
+- `src/components/` — UI 元件（播放器、字幕卡、控制列、抽屜等）
+- `src/App.tsx` — 主要學習頁面
+

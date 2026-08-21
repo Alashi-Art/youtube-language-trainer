@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { AlertCircle } from 'lucide-react'
 import type { YouTubePlayer } from 'react-youtube'
 import { Controls } from './components/Controls'
 import { Header } from './components/Header'
@@ -40,9 +41,13 @@ export default function App() {
           {error && (
             <div
               role="alert"
-              className="whitespace-pre-wrap rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200"
+              className="flex items-start gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200"
             >
-              {error}
+              <AlertCircle className="mt-0.5 size-5 shrink-0 text-rose-400" />
+              <div className="whitespace-pre-wrap leading-relaxed">
+                <p className="font-medium text-rose-300">載入提示</p>
+                <p className="mt-0.5 text-xs text-rose-200/90">{error}</p>
+              </div>
             </div>
           )}
 

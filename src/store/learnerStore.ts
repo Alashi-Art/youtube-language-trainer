@@ -1,9 +1,8 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { fetchClientCaptions } from '../lib/captionFetcher'
 import { extractVideoId } from '../lib/youtube'
 import type {
-  CaptionsError,
-  CaptionsResponse,
   DrawerTab,
   PlaybackRate,
   PracticeRange,
@@ -150,55 +149,34 @@ export const useLearnerStore = create<LearnerState>()(
       loadVideo: async () => {
         const videoId = extractVideoId(get().urlInput)
         if (!videoId) {
-          set({ error: '無法解析 YouTube 網址，請檢查格式。', videoId: null, cues: [] })
+          set({ error: '無法解析 YouTube 網址，請輸入正確的影片連結。', videoId: null, cues: [] })
           return
         }
 
         set({ loading: true, error: null })
 
         try {
-          const res = await fetch(
-            `/api/transcript?videoId=${encodeURIComponent(videoId)}&lang=en&translationLang=zh`,
-          )
-
-          let data: CaptionsResponse | CaptionsError
-          const contentType = res.headers.get('content-type')
-          if (contentType && contentType.includes('application/json')) {
-            data = (await res.json()) as CaptionsResponse | CaptionsError
-          } else {
-            const text = await res.text()
-            throw new Error(
-              `API 回應非預期格式 (${res.status} ${res.statusText})：${text.slice(0, 120)}`,
-            )
-          }
-
-          if (!res.ok || 'error' in data) {
-            const err = data as CaptionsError
-            set({
-              loading: false,
-              error: [err.error, err.detail, err.hint].filter(Boolean).join('\n'),
-              videoId: null,
-              cues: [],
-            })
-            return
-          }
+          const result = await fetchClientCaptions(videoId)
 
           set({
             loading: false,
-            videoId: data.videoId,
-            cues: data.cues,
+            videoId: result.videoId,
+            cues: result.cues,
             currentIndex: 0,
             practiceRange: null,
             error: null,
             meta: {
-              languageName: data.languageName,
-              translationLanguageName: data.translationLanguageName,
+              languageName: result.languageName,
+              translationLanguageName: result.translationLanguageName,
             },
           })
         } catch (e) {
           set({
             loading: false,
-            error: e instanceof Error ? e.message : String(e),
+            error:
+              e instanceof Error
+                ? e.message
+                : '該影片未提供內建字幕或無法解析，請試試其他影片。',
             videoId: null,
             cues: [],
           })
